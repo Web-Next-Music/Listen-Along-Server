@@ -73,6 +73,34 @@ const rooms = new Map();
 // roomId → { lastTimeline, lastPlaystate, lastPath }  (state for late joiners)
 const roomState = new Map();
 
+const TIMELINE_MIN_INTERVAL_MS = 1500; // don't relay more often than 1.5s
+const TIMELINE_SKIP_THRESHOLD = 1; // ignore sub-second jitter
+// roomId → { lastValue, lastSentAt }
+const timelineThrottle = new Map();
+
+function shouldRelayTimeline(roomId, value) {
+    const now = Date.now();
+    const t = timelineThrottle.get(roomId) || {
+        lastValue: null,
+        lastSentAt: 0,
+    };
+    if (
+        now - t.lastSentAt < TIMELINE_MIN_INTERVAL_MS &&
+        t.lastValue !== null &&
+        Math.abs(value - t.lastValue) <= TIMELINE_SKIP_THRESHOLD
+    ) {
+        return false;
+    }
+    t.lastValue = value;
+    t.lastSentAt = now;
+    timelineThrottle.set(roomId, t);
+    return true;
+}
+
+// ─── OPTIMISATION 2: Avatar cache (in-memory) to avoid disk reads ─────
+// roomId__clientId → base64 string
+const avatarCache = new Map();
+
 function getRoomClients(roomId) {
     if (!rooms.has(roomId)) rooms.set(roomId, new Set());
     return rooms.get(roomId);
@@ -89,11 +117,13 @@ function cleanupClient(ws) {
     const roomClients = rooms.get(roomId);
     if (roomClients) {
         roomClients.delete(ws);
-        if (roomClients.size === 0) rooms.delete(roomId);
+        if (roomClients.size === 0) {
+            rooms.delete(roomId);
+            timelineThrottle.delete(roomId);
+        }
         console.log(
             `❌ [${ws._clientId}] left [${roomId}] | In room: ${roomClients.size}`,
         );
-        // Notify remaining clients that this client left
         broadcastToRoom(roomId, {
             type: "client_left",
             clientId: ws._clientId,
@@ -115,7 +145,6 @@ async function processAvatar(buffer) {
         throw new Error(
             "sharp is not installed on the server (npm install sharp)",
         );
-    // Convert any image format → WebP 50x50
     const webpBuf = await sharp(buffer)
         .resize(50, 50, { fit: "cover", position: "centre" })
         .webp({ quality: 85 })
@@ -135,7 +164,6 @@ function fetchUrl(url) {
                     res.statusCode < 400 &&
                     res.headers.location
                 ) {
-                    // Follow redirect once
                     return fetchUrl(res.headers.location)
                         .then(resolve)
                         .catch(reject);
@@ -154,10 +182,11 @@ function fetchUrl(url) {
 
 // ─── Broadcast ────────────────────────────────────────────────────────
 
+// OPTIMISATION 3: Serialise once, not per-client
 function broadcastToRoom(roomId, msgObj, sender = null) {
     const roomClients = rooms.get(roomId);
-    if (!roomClients) return 0;
-    const msg = JSON.stringify(msgObj);
+    if (!roomClients || roomClients.size === 0) return 0;
+    const msg = JSON.stringify(msgObj); // serialise ONCE
     let sent = 0;
     for (const client of roomClients) {
         if (client !== sender && client.readyState === 1) {
@@ -170,7 +199,7 @@ function broadcastToRoom(roomId, msgObj, sender = null) {
 
 // ─── WebSocket server ─────────────────────────────────────────────────
 
-const wss = new WebSocketServer({ port: PORT, maxPayload: 10 * 1024 * 1024 }); // 10MB for avatars
+const wss = new WebSocketServer({ port: PORT, maxPayload: 10 * 1024 * 1024 });
 
 wss.on("connection", (ws, req) => {
     const urlParams = new URL(req.url, "ws://localhost").searchParams;
@@ -193,51 +222,28 @@ wss.on("connection", (ws, req) => {
         `✅ [${clientId}] → room [${roomId}] | Clients: ${roomClients.size}`,
     );
 
-    // Notify existing clients that someone joined
     broadcastToRoom(roomId, { type: "client_joined", clientId }, ws);
 
     // ── Send state to new joiner ──
-    // 1. Send full list of currently connected members (with avatars if available)
+    // 1. Existing members + their avatars (from in-memory _avatar or cache)
     for (const member of roomClients) {
-        if (member !== ws) {
-            ws.send(
-                JSON.stringify({
-                    type: "client_joined",
-                    clientId: member._clientId,
-                    avatar: member._avatar || null,
-                }),
-            );
-        }
-    }
-    // 2. Avatars saved on disk for currently connected members (in case _avatar is null but file exists)
-    try {
-        const connectedIds = new Set(
-            [...roomClients]
-                .filter((c) => c !== ws && !c._avatar)
-                .map((c) => c._clientId),
+        if (member === ws) continue;
+        // OPTIMISATION 4: prefer in-memory _avatar, fall back to avatarCache, skip disk
+        const avatarData =
+            member._avatar ||
+            avatarCache.get(`${roomId}__${member._clientId}`) ||
+            null;
+        if (avatarData && !member._avatar) member._avatar = avatarData; // backfill
+        ws.send(
+            JSON.stringify({
+                type: "client_joined",
+                clientId: member._clientId,
+                avatar: avatarData,
+            }),
         );
-        for (const cid of connectedIds) {
-            const filePath = path.join(AVATARS_DIR, `${roomId}__${cid}.webp`);
-            if (fs.existsSync(filePath)) {
-                const buf = fs.readFileSync(filePath);
-                const b64 = buf.toString("base64");
-                // Update in-memory too
-                const member = [...roomClients].find(
-                    (c) => c._clientId === cid,
-                );
-                if (member) member._avatar = b64;
-                ws.send(
-                    JSON.stringify({
-                        type: "avatar",
-                        clientId: cid,
-                        data: b64,
-                    }),
-                );
-            }
-        }
-    } catch {}
+    }
 
-    // 3. Last known playback state
+    // 2. Last known playback state
     const state = getRoomState(roomId);
     if (state.lastPath)
         ws.send(
@@ -271,16 +277,23 @@ wss.on("connection", (ws, req) => {
                 const processed = await processAvatar(
                     Buffer.isBuffer(data) ? data : Buffer.from(data),
                 );
-                ws._avatar = processed.toString("base64");
+                const b64 = processed.toString("base64");
+                ws._avatar = b64;
+                // OPTIMISATION 5: write to disk async (non-blocking)
                 const filename = `${roomId}__${clientId}.webp`;
-                fs.writeFileSync(path.join(AVATARS_DIR, filename), processed);
+                fs.promises
+                    .writeFile(path.join(AVATARS_DIR, filename), processed)
+                    .catch((e) =>
+                        console.warn(`⚠️ Avatar save failed: ${e.message}`),
+                    );
+                avatarCache.set(`${roomId}__${clientId}`, b64);
                 console.log(
                     `🖼️  Avatar [${clientId}] converted and saved (${processed.length}b)`,
                 );
                 const payload = JSON.stringify({
                     type: "avatar",
                     clientId,
-                    data: ws._avatar,
+                    data: b64,
                 });
                 for (const client of roomClients) {
                     if (client.readyState === 1) client.send(payload);
@@ -319,7 +332,7 @@ wss.on("connection", (ws, req) => {
 
         msg.clientId = clientId;
 
-        // Handle avatar_url: server fetches the image (bypasses CORS)
+        // Handle avatar_url
         if (msg.type === "avatar_url") {
             if (
                 !msg.url ||
@@ -338,16 +351,23 @@ wss.on("connection", (ws, req) => {
                 console.log(`🌐 Fetching avatar [${clientId}]: ${msg.url}`);
                 const rawBuf = await fetchUrl(msg.url);
                 const processed = await processAvatar(rawBuf);
-                ws._avatar = processed.toString("base64");
+                const b64 = processed.toString("base64");
+                ws._avatar = b64;
+                avatarCache.set(`${roomId}__${clientId}`, b64);
                 const filename = `${roomId}__${clientId}.webp`;
-                fs.writeFileSync(path.join(AVATARS_DIR, filename), processed);
+                // OPTIMISATION 5: async disk write
+                fs.promises
+                    .writeFile(path.join(AVATARS_DIR, filename), processed)
+                    .catch((e) =>
+                        console.warn(`⚠️ Avatar save failed: ${e.message}`),
+                    );
                 console.log(
                     `🖼️  Avatar [${clientId}] fetched and saved (${processed.length}b)`,
                 );
                 const payload = JSON.stringify({
                     type: "avatar",
                     clientId,
-                    data: ws._avatar,
+                    data: b64,
                 });
                 for (const client of roomClients) {
                     if (client.readyState === 1) client.send(payload);
@@ -372,9 +392,13 @@ wss.on("connection", (ws, req) => {
         if (msg.type === "playstate") st.lastPlaystate = msg.href;
         if (msg.type === "timeline") st.lastTimeline = msg.value;
 
+        // OPTIMISATION 1: throttle timeline relay, but always pass manual seeks
+        if (msg.type === "timeline") {
+            if (!msg.seek && !shouldRelayTimeline(roomId, msg.value)) return;
+        }
+
         const sent = broadcastToRoom(roomId, msg, ws);
         if (msg.type !== "timeline") {
-            // don't spam logs with timeline
             console.log(
                 `📨 [${roomId}] [${clientId}] type=${msg.type || "?"} → ${sent} client(s)`,
             );
