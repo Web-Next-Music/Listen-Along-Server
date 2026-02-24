@@ -1,0 +1,5 @@
+{
+    "port": 7080,
+    "roomsFile": "./rooms.txt",
+    "avatarsDir": "./avatars"
+}
