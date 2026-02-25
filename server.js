@@ -290,14 +290,15 @@ wss.on("connection", (ws, req) => {
                 console.log(
                     `🖼️  Avatar [${clientId}] converted and saved (${processed.length}b)`,
                 );
-                const payload = JSON.stringify({
-                    type: "avatar",
-                    clientId,
-                    data: b64,
-                });
-                for (const client of roomClients) {
-                    if (client.readyState === 1) client.send(payload);
-                }
+                broadcastToRoom(
+                    roomId,
+                    { type: "avatar", clientId, data: b64 },
+                    ws,
+                );
+                // Отправляем себе тоже — чтобы клиент обновил свой аватар в UI
+                ws.send(
+                    JSON.stringify({ type: "avatar", clientId, data: b64 }),
+                );
             } catch (e) {
                 console.warn(`❌ Avatar [${clientId}] error: ${e.message}`);
                 ws.send(
@@ -364,14 +365,15 @@ wss.on("connection", (ws, req) => {
                 console.log(
                     `🖼️  Avatar [${clientId}] fetched and saved (${processed.length}b)`,
                 );
-                const payload = JSON.stringify({
-                    type: "avatar",
-                    clientId,
-                    data: b64,
-                });
-                for (const client of roomClients) {
-                    if (client.readyState === 1) client.send(payload);
-                }
+                broadcastToRoom(
+                    roomId,
+                    { type: "avatar", clientId, data: b64 },
+                    ws,
+                );
+                // Отправляем себе тоже — чтобы клиент обновил свой аватар в UI
+                ws.send(
+                    JSON.stringify({ type: "avatar", clientId, data: b64 }),
+                );
             } catch (e) {
                 console.warn(
                     `❌ Failed to fetch avatar [${clientId}]: ${e.message}`,
