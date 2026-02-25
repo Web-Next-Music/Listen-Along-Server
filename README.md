@@ -20,9 +20,9 @@ On first run, `config.json` is auto-generated with default values:
 ```json
 {
     "port": 7080,
+    "name": "My Server",
     "roomsFile": "./rooms.txt",
     "avatarsDir": "./avatars",
-    "name": "My Server"
 }
 ```
 

@@ -12,6 +12,7 @@ const CONFIG_FILE = path.join(__dirname, "config.json");
 
 const DEFAULT_CONFIG = {
     port: 7080,
+    name: "My Server",
     roomsFile: "./rooms.txt",
     avatarsDir: "./avatars",
 };
