@@ -4,6 +4,7 @@ const fs = require("fs");
 const path = require("path");
 const https = require("https");
 const http = require("http");
+const { spawnSync } = require("child_process");
 
 // ─── Config ───────────────────────────────────────────────────────────
 
@@ -11,8 +12,10 @@ const CONFIG_FILE = path.join(__dirname, "config.json");
 const DEFAULT_CONFIG = {
     port: 7080,
     name: "My Server",
-    roomsFile: "./rooms.txt",
+    rooms: "./rooms.txt",
     avatarsDir: "./avatars",
+    cert: "./certs/cert.pem",
+    key: "./certs/key.pem",
 };
 
 function loadConfig() {
@@ -34,9 +37,132 @@ function loadConfig() {
 
 const config = loadConfig();
 const PORT = config.port;
-const ROOMS_FILE = path.resolve(__dirname, config.roomsFile);
+const ROOMS_FILE = path.resolve(__dirname, config.rooms);
 const AVATARS_DIR = path.resolve(__dirname, config.avatarsDir);
+
 if (!fs.existsSync(AVATARS_DIR)) fs.mkdirSync(AVATARS_DIR, { recursive: true });
+
+// ─── TLS Certificate ──────────────────────────────────────────────────
+
+const CERT_FILE = path.resolve(__dirname, config.cert);
+const KEY_FILE = path.resolve(__dirname, config.key);
+
+/**
+ * Возвращает true если сертификат истекает в ближайшие 30 дней или недоступен.
+ */
+function isCertExpiringSoon() {
+    try {
+        const result = spawnSync(
+            "openssl",
+            ["x509", "-noout", "-enddate", "-in", CERT_FILE],
+            { encoding: "utf8" },
+        );
+        if (result.status !== 0) return true;
+        // notAfter=May 10 12:00:00 2026 GMT
+        const match = result.stdout.match(/notAfter=(.+)/);
+        if (!match) return true;
+        const expiry = new Date(match[1].trim());
+        const daysLeft = (expiry - Date.now()) / (1000 * 60 * 60 * 24);
+        console.log(
+            `🔐 Certificate expires in ${Math.floor(daysLeft)} day(s) (${expiry.toDateString()})`,
+        );
+        return daysLeft < 30;
+    } catch {
+        return true;
+    }
+}
+
+/**
+ * Генерирует самоподписанный RSA-2048 сертификат на 825 дней через openssl.
+ */
+function generateSelfSignedCert() {
+    console.log(
+        `🔑 Generating self-signed certificate → ${path.dirname(CERT_FILE)}`,
+    );
+
+    // Шаг 1: RSA-2048 приватный ключ
+    const keyResult = spawnSync(
+        "openssl",
+        ["genrsa", "-out", KEY_FILE, "2048"],
+        { encoding: "utf8" },
+    );
+
+    if (keyResult.status !== 0) {
+        throw new Error(`openssl genrsa failed:\n${keyResult.stderr}`);
+    }
+
+    // Шаг 2: самоподписанный сертификат
+    // Пробуем с -addext (OpenSSL 1.1.1+) для поддержки SAN в Chrome/Firefox
+    const certArgs = [
+        "req",
+        "-new",
+        "-x509",
+        "-key",
+        KEY_FILE,
+        "-out",
+        CERT_FILE,
+        "-days",
+        "825",
+        "-subj",
+        "/CN=ListenAlong/O=ListenAlong/C=US",
+        "-addext",
+        "subjectAltName=IP:127.0.0.1,IP:::1,DNS:localhost",
+    ];
+
+    let certResult = spawnSync("openssl", certArgs, { encoding: "utf8" });
+
+    if (certResult.status !== 0) {
+        // Фоллбэк для старых OpenSSL без -addext
+        const fallbackArgs = [
+            "req",
+            "-new",
+            "-x509",
+            "-key",
+            KEY_FILE,
+            "-out",
+            CERT_FILE,
+            "-days",
+            "825",
+            "-subj",
+            "/CN=ListenAlong/O=ListenAlong/C=US",
+        ];
+        certResult = spawnSync("openssl", fallbackArgs, { encoding: "utf8" });
+        if (certResult.status !== 0) {
+            throw new Error(`openssl req failed:\n${certResult.stderr}`);
+        }
+    }
+
+    // Фиксируем права — ключ должен читать только владелец
+    try {
+        fs.chmodSync(KEY_FILE, 0o600);
+    } catch {}
+
+    console.log(`✅ Certificate ready`);
+    console.log(`   cert: ${CERT_FILE}`);
+    console.log(`   key:  ${KEY_FILE}`);
+}
+
+/**
+ * Загружает TLS-опции из cert/key (config.json).
+ * Если файлов нет или сертификат истекает — автогенерирует самоподписанный
+ * в ту же папку где лежат cert/key.
+ */
+function loadTlsOptions() {
+    const certMissing = !fs.existsSync(CERT_FILE) || !fs.existsSync(KEY_FILE);
+    if (certMissing || isCertExpiringSoon()) {
+        // Убеждаемся что папка существует
+        const certsDir = path.dirname(CERT_FILE);
+        if (!fs.existsSync(certsDir))
+            fs.mkdirSync(certsDir, { recursive: true });
+        generateSelfSignedCert();
+    }
+    return {
+        cert: fs.readFileSync(CERT_FILE),
+        key: fs.readFileSync(KEY_FILE),
+    };
+}
+
+const tlsOptions = loadTlsOptions();
 
 // ─── Room management ─────────────────────────────────────────────────
 
@@ -62,7 +188,6 @@ fs.watch(ROOMS_FILE, () => {
 
 // roomId → Set<ws>
 const rooms = new Map();
-
 const roomState = new Map();
 
 function getRoomState(roomId) {
@@ -78,14 +203,12 @@ function getRoomState(roomId) {
     return roomState.get(roomId);
 }
 
-/** Текущая расчётная позиция в секундах с учётом прошедшего времени */
 function currentPosition(state) {
     if (!state.playing) return state.position;
     const elapsed = (Date.now() - state.positionSetAt) / 1000;
     return state.position + elapsed;
 }
 
-/** Зафиксировать новую позицию (снапшот «сейчас») */
 function snapshotPosition(state) {
     state.position = currentPosition(state);
     state.positionSetAt = Date.now();
@@ -111,7 +234,6 @@ function broadcastAll(roomId, msgObj) {
     return broadcastToRoom(roomId, msgObj, null);
 }
 
-/** Отправить эталонное состояние всем в комнате */
 function broadcastStateSync(roomId, triggeredBy = "server") {
     const state = getRoomState(roomId);
     broadcastAll(roomId, {
@@ -124,15 +246,14 @@ function broadcastStateSync(roomId, triggeredBy = "server") {
     });
 }
 
-// ─── Periodic server-side sync (каждые 5 сек) ────────────────────────
-// Рассылаем state_sync даже без действий — чтобы подтянуть отставших.
+// ─── Periodic heartbeat sync (every 5s) ──────────────────────────────
 
 const SYNC_INTERVAL_MS = 5000;
 setInterval(() => {
     for (const [roomId, clients] of rooms) {
         if (clients.size === 0) continue;
         const state = getRoomState(roomId);
-        if (!state.path) continue; // ничего не играет — не нужен sync
+        if (!state.path) continue;
         broadcastStateSync(roomId, "heartbeat");
     }
 }, SYNC_INTERVAL_MS);
@@ -203,12 +324,16 @@ function cleanupClient(ws) {
     }
 }
 
-// ─── WebSocket server ─────────────────────────────────────────────────
+// ─── HTTPS + WebSocket server ─────────────────────────────────────────
 
-const wss = new WebSocketServer({ port: PORT, maxPayload: 10 * 1024 * 1024 });
+const httpsServer = https.createServer(tlsOptions);
+const wss = new WebSocketServer({
+    server: httpsServer,
+    maxPayload: 10 * 1024 * 1024,
+});
 
 wss.on("connection", (ws, req) => {
-    const urlParams = new URL(req.url, "ws://localhost").searchParams;
+    const urlParams = new URL(req.url, "wss://localhost").searchParams;
     const roomId = urlParams.get("room");
     const clientId = urlParams.get("clientId") || `client_${Date.now()}`;
 
@@ -272,9 +397,11 @@ wss.on("connection", (ws, req) => {
                 );
                 const b64 = processed.toString("base64");
                 ws._avatar = b64;
-                const filename = `${roomId}__${clientId}.webp`;
                 fs.promises
-                    .writeFile(path.join(AVATARS_DIR, filename), processed)
+                    .writeFile(
+                        path.join(AVATARS_DIR, `${roomId}__${clientId}.webp`),
+                        processed,
+                    )
                     .catch((e) => console.warn(`⚠️ Avatar save: ${e.message}`));
                 avatarCache.set(`${roomId}__${clientId}`, b64);
                 broadcastToRoom(
@@ -362,67 +489,56 @@ wss.on("connection", (ws, req) => {
             return;
         }
 
-        // ──────────────────────────────────────────────────────────────────
-        // Команды управления воспроизведением — обновляем СЕРВЕРНОЕ состояние
-        // и рассылаем state_sync всем (включая отправителя, чтобы подтвердить).
-        // ──────────────────────────────────────────────────────────────────
-
-        const state = getRoomState(roomId);
+        const st = getRoomState(roomId);
 
         if (msg.type === "navigate") {
-            // Смена трека
             console.log(
                 `📀 [${roomId}] navigate by [${clientId}]: ${msg.path}`,
             );
-            snapshotPosition(state);
-            state.path = msg.path;
-            state.position = 0;
-            state.positionSetAt = Date.now();
-            state.playing = true; // предполагаем, что после навигации начинается воспроизведение
+            snapshotPosition(st);
+            st.path = msg.path;
+            st.position = 0;
+            st.positionSetAt = Date.now();
+            st.playing = true;
             broadcastStateSync(roomId, clientId);
             return;
         }
 
         if (msg.type === "playstate") {
-            // play / pause
             const wantPlay =
                 msg.href &&
                 (msg.href.includes("pause") || msg.href.includes("Pause"));
-            // wantPlay: если href содержит "pause" — значит сейчас ИГРАЕТ (иконка паузы видна)
-            if (state.playing !== wantPlay) {
+            if (st.playing !== wantPlay) {
                 console.log(
                     `${wantPlay ? "▶️" : "⏸️"} [${roomId}] playstate by [${clientId}]`,
                 );
-                snapshotPosition(state);
-                state.playing = wantPlay;
+                snapshotPosition(st);
+                st.playing = wantPlay;
             }
             broadcastStateSync(roomId, clientId);
             return;
         }
 
         if (msg.type === "seek") {
-            // Явный seek (перемотка)
             console.log(
                 `⏩ [${roomId}] seek by [${clientId}]: ${msg.position}s`,
             );
-            state.position = parseFloat(msg.position) || 0;
-            state.positionSetAt = Date.now();
+            st.position = parseFloat(msg.position) || 0;
+            st.positionSetAt = Date.now();
             broadcastStateSync(roomId, clientId);
             return;
         }
 
-        // Устаревший timeline — конвертируем в seek для обратной совместимости
         if (msg.type === "timeline" && msg.seek) {
             console.log(
                 `⏩ [${roomId}] seek(legacy) by [${clientId}]: ${msg.value}s`,
             );
-            state.position = parseFloat(msg.value) || 0;
-            state.positionSetAt = Date.now();
+            st.position = parseFloat(msg.value) || 0;
+            st.positionSetAt = Date.now();
             broadcastStateSync(roomId, clientId);
             return;
         }
 
-        // Любое другое сообщение — пересылаем как есть
         broadcastToRoom(roomId, msg, ws);
     });
 
@@ -433,17 +549,21 @@ wss.on("connection", (ws, req) => {
     });
 });
 
+httpsServer.listen(PORT, () => {
+    console.log(`🚀 WSS server started on wss://0.0.0.0:${PORT}`);
+    console.log(`📁 Rooms file:  ${ROOMS_FILE}`);
+    console.log(`🔐 Certs dir:   ${path.dirname(CERT_FILE)}`);
+    console.log(
+        `✏️  Commands: <roomId> <path>  |  rooms  |  clients  |  state <roomId>\n`,
+    );
+});
+
 // ─── Terminal admin ───────────────────────────────────────────────────
 
 const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout,
 });
-console.log(`🚀 WS server started on ws://0.0.0.0:${PORT}`);
-console.log(`📁 Rooms file: ${ROOMS_FILE}`);
-console.log(
-    `✏️  Commands: <roomId> <path>  |  rooms  |  clients  |  state <roomId>\n`,
-);
 
 rl.on("line", (input) => {
     const trimmed = input.trim();
@@ -472,7 +592,6 @@ rl.on("line", (input) => {
         }
         return;
     }
-    // navigate command: <roomId> <path>
     const roomId = cmd;
     if (!validRooms.has(roomId)) {
         console.warn(`⚠️ Room [${roomId}] not found`);

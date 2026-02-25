@@ -1,3 +1,4 @@
 node_modules/
+/certs
 avatars
 package-lock.json

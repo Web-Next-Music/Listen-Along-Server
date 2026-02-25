@@ -21,17 +21,21 @@ On first run, `config.json` is auto-generated with default values:
 {
     "port": 7080,
     "name": "My Server",
-    "roomsFile": "./rooms.txt",
+    "rooms": "./rooms.txt",
     "avatarsDir": "./avatars",
+    "cert": "./certs/cert.pem",
+    "key": "./certs/key.pem"
 }
 ```
 
-| Field        | Default        | Description                                       |
-|--------------|----------------|---------------------------------------------------|
-| `port`       | `7080`         | Port the WebSocket server listens on              |
-| `roomsFile`  | `./rooms.txt`  | Path to the file with allowed room IDs            |
-| `avatarsDir` | `./avatars`    | Directory where processed avatar images are saved |
-| `name`       | *(optional)*   | Server name sent to clients on connect            |
+| Field        | Default              | Description                                       |
+|--------------|----------------------|---------------------------------------------------|
+| `port`       | `7080`               | Port the WebSocket server listens on              |
+| `rooms`      | `./rooms.txt`        | Path to the file with allowed room IDs            |
+| `avatarsDir` | `./avatars`          | Directory where processed avatar images are saved |
+| `name`       | *(optional)*         | Server name sent to clients on connect            |
+| `cert`       | `./certs/cert.pem`   | Path to TLS certificate                           |
+| `key`        | `./certs/key.pem`    | Path to TLS private key                           |
 
 Edit `config.json` to change these values before starting the server.
 
@@ -64,7 +68,7 @@ npm start
 Clients connect via WebSocket with `room` and `clientId` query parameters:
 
 ```
-ws://IP:PORT?room=ROOMID&clientId=CLIENTID
+wss://IP:PORT?room=ROOMID&clientId=CLIENTID
 ```
 
 - `room` — must match a room ID in `rooms.txt`, otherwise the connection is rejected.
