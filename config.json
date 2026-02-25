@@ -1,5 +1,6 @@
 {
     "port": 7080,
+    "name": "My Server",
     "roomsFile": "./rooms.txt",
     "avatarsDir": "./avatars"
 }

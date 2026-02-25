@@ -224,6 +224,9 @@ wss.on("connection", (ws, req) => {
 
     broadcastToRoom(roomId, { type: "client_joined", clientId }, ws);
 
+    // ── Send server info to new joiner ──
+    ws.send(JSON.stringify({ type: "server_info", name: config.name || null }));
+
     // ── Send state to new joiner ──
     // 1. Existing members + their avatars (from in-memory _avatar or cache)
     for (const member of roomClients) {
