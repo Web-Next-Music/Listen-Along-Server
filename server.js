@@ -193,7 +193,7 @@ const roomState = new Map();
 function getRoomState(roomId) {
     if (!roomState.has(roomId)) {
         roomState.set(roomId, {
-            path: null,
+            trackId: null,
             playing: false,
             position: 0,
             positionSetAt: Date.now(),
@@ -238,7 +238,7 @@ function broadcastStateSync(roomId, triggeredBy = "server") {
     const state = getRoomState(roomId);
     broadcastAll(roomId, {
         type: "state_sync",
-        path: state.path,
+        trackId: state.trackId,
         playing: state.playing,
         position: currentPosition(state),
         serverTime: Date.now(),
@@ -248,12 +248,12 @@ function broadcastStateSync(roomId, triggeredBy = "server") {
 
 // ─── Periodic heartbeat sync (every 5s) ──────────────────────────────
 
-const SYNC_INTERVAL_MS = 5000;
+const SYNC_INTERVAL_MS = 10000;
 setInterval(() => {
     for (const [roomId, clients] of rooms) {
         if (clients.size === 0) continue;
         const state = getRoomState(roomId);
-        if (!state.path) continue;
+        if (!state.trackId) continue;
         broadcastStateSync(roomId, "heartbeat");
     }
 }, SYNC_INTERVAL_MS);
@@ -375,11 +375,11 @@ wss.on("connection", (ws, req) => {
 
     // Отправить эталонное состояние новому участнику
     const state = getRoomState(roomId);
-    if (state.path) {
+    if (state.trackId) {
         ws.send(
             JSON.stringify({
                 type: "state_sync",
-                path: state.path,
+                trackId: state.trackId,
                 playing: state.playing,
                 position: currentPosition(state),
                 serverTime: Date.now(),
@@ -492,11 +492,13 @@ wss.on("connection", (ws, req) => {
         const st = getRoomState(roomId);
 
         if (msg.type === "navigate") {
+            const trackId = msg.trackId ?? msg.path ?? null; // совместимость
+            if (!trackId) return;
             console.log(
-                `📀 [${roomId}] navigate by [${clientId}]: ${msg.path}`,
+                `📀 [${roomId}] navigate by [${clientId}]: trackId=${trackId}`,
             );
             snapshotPosition(st);
-            st.path = msg.path;
+            st.trackId = trackId;
             st.position = 0;
             st.positionSetAt = Date.now();
             st.playing = true;
@@ -585,7 +587,7 @@ rl.on("line", (input) => {
         if (rid && roomState.has(rid)) {
             const s = getRoomState(rid);
             console.log(
-                `[${rid}] path=${s.path} playing=${s.playing} pos=${currentPosition(s).toFixed(1)}s`,
+                `[${rid}] trackId=${s.trackId} playing=${s.playing} pos=${currentPosition(s).toFixed(1)}s`,
             );
         } else {
             console.log("Usage: state <roomId>");
@@ -597,12 +599,12 @@ rl.on("line", (input) => {
         console.warn(`⚠️ Room [${roomId}] not found`);
         return;
     }
-    const newPath = rest.join(" ");
+    const newTrackId = rest.join(" ");
     const state = getRoomState(roomId);
-    state.path = newPath;
+    state.trackId = newTrackId;
     state.position = 0;
     state.positionSetAt = Date.now();
     state.playing = true;
     broadcastStateSync(roomId, "server-admin");
-    console.log(`📤 [${roomId}] → navigate: ${newPath}`);
+    console.log(`📤 [${roomId}] → navigate: trackId=${newTrackId}`);
 });
