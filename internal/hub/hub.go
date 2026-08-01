@@ -2,6 +2,7 @@ package hub
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"sort"
 	"sync"
@@ -14,8 +15,11 @@ import (
 
 const (
 	// SyncInterval is how often each active room is re-broadcast so drifting
-	// listeners converge without waiting for a host action.
-	SyncInterval = 10 * time.Second
+	// listeners converge without waiting for a host action. Clients
+	// extrapolate between anchors, so this only has to be often enough to
+	// correct estimation error - but 10s left a stalled listener visibly
+	// behind for far too long.
+	SyncInterval = 2 * time.Second
 	// stateTTL is how long a room's playback state is kept after the last
 	// client leaves.
 	stateTTL = 10 * time.Minute
@@ -97,12 +101,40 @@ func (h *Hub) room(id string) *room {
 	return r
 }
 
+// uniqueIDLocked keeps client ids distinct within a room. Ids come from each
+// client's own config, so two people who copied the same config would share
+// one - and since every client decides whether it is host by comparing hostId
+// to its own id, both would answer yes. Renaming the newcomer keeps exactly one
+// client matching the host id.
+func uniqueIDLocked(r *room, want string) string {
+	taken := func(id string) bool {
+		for c := range r.clients {
+			if c.id == id {
+				return true
+			}
+		}
+		return false
+	}
+
+	if !taken(want) {
+		return want
+	}
+
+	for n := 2; ; n++ {
+		candidate := fmt.Sprintf("%s (%d)", want, n)
+		if !taken(candidate) {
+			return candidate
+		}
+	}
+}
+
 // join registers c and returns the messages it must receive, in order.
 func (h *Hub) join(c *Client) []any {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
 	r := h.room(c.roomID)
+	c.id = uniqueIDLocked(r, c.id)
 	r.clients[c] = struct{}{}
 	r.emptySince = time.Time{}
 
@@ -120,6 +152,7 @@ func (h *Hub) join(c *Client) []any {
 		Name:     h.name,
 		Protocol: protocol.Version,
 		HostID:   hostID,
+		ClientID: c.id,
 	}}
 
 	for member := range r.clients {

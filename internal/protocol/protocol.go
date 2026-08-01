@@ -71,6 +71,9 @@ type ServerInfo struct {
 	Name     string `json:"name"`
 	Protocol int    `json:"protocol"`
 	HostID   string `json:"hostId"`
+	// ClientID is the id the room actually knows this client by, which is not
+	// the requested one when that was already taken.
+	ClientID string `json:"clientId"`
 }
 
 type AuthResult struct {

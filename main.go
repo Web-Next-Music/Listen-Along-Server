@@ -107,6 +107,14 @@ func run() error {
 	roomList := rooms.New(cfg.RoomsPath())
 	go roomList.Watch(ctx)
 
+	// An empty allow-list rejects every client with "unknown room", which
+	// looks like a client problem rather than a server one. Say so plainly,
+	// with the path that was actually read.
+	if len(roomList.All()) == 0 {
+		slog.Warn("no rooms configured - every connection will be rejected",
+			"roomsPath", cfg.RoomsPath(), "configDir", config.Dir)
+	}
+
 	avatars := avatar.NewStore(cfg.AvatarsPath())
 	h := hub.New(cfg.Name, cfg.AdminToken, roomList, avatars)
 	go h.Heartbeat(ctx)

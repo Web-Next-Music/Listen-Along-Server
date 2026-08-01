@@ -32,13 +32,39 @@ type Config struct {
 
 func init() {
 	exe, err := os.Executable()
-	// `go run` builds into a temp dir; fall back to the working directory so
-	// dev runs pick up the repo's config.json and rooms.txt.
-	if err != nil || strings.HasPrefix(exe, os.TempDir()) {
+	if err != nil || isEphemeralBuild(exe) {
 		SetDir(".")
 		return
 	}
 	SetDir(filepath.Dir(exe))
+}
+
+// isEphemeralBuild reports whether exe is a binary `go run` produced rather
+// than an installed one, in which case the files next to it are build
+// artefacts and the repo's config.json and rooms.txt are in the working
+// directory instead.
+//
+// Checking only os.TempDir() was not enough: `go run` links into the build
+// cache, which is $GOCACHE - usually ~/.cache/go-build - and only lands under
+// /tmp when that cache happens to live there. On any machine with the default
+// XDG cache the server silently resolved rooms.txt inside the cache directory,
+// found nothing, and rejected every room as unknown.
+func isEphemeralBuild(exe string) bool {
+	if strings.HasPrefix(exe, os.TempDir()) {
+		return true
+	}
+
+	// The "b001" style link directory `go run` uses always sits under a
+	// go-build cache root, whatever GOCACHE points at.
+	if strings.Contains(filepath.ToSlash(exe), "/go-build/") {
+		return true
+	}
+
+	if cache, err := os.UserCacheDir(); err == nil {
+		return strings.HasPrefix(exe, filepath.Join(cache, "go-build"))
+	}
+
+	return false
 }
 
 // SetDir points the config package at a different directory, recomputing the
