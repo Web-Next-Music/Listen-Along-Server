@@ -1,0 +1,65 @@
+version: '3'
+
+vars:
+  BINARY: listenalong
+  DIST: dist
+  VERSION:
+    sh: git describe --tags --always --dirty 2>/dev/null || echo dev
+  LDFLAGS: -s -w -X main.version={{.VERSION}}
+
+tasks:
+  default:
+    deps: [fmt, vet, build]
+
+  run:
+    cmds:
+      - go run -ldflags "{{.LDFLAGS}}" .
+
+  build:
+    cmds:
+      - go build -ldflags "{{.LDFLAGS}}" -o {{.BINARY}} .
+
+  build-windows:
+    env:
+      GOOS: windows
+      GOARCH: amd64
+    cmds:
+      - go build -ldflags "{{.LDFLAGS}}" -o {{.BINARY}}.exe .
+
+  dist:
+    deps: [clean-dist]
+    vars:
+      WIN: "{{.BINARY}}-{{.VERSION}}-windows-amd64"
+      LIN: "{{.BINARY}}-{{.VERSION}}-linux-amd64"
+    cmds:
+      - mkdir -p {{.DIST}}
+      - CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags "{{.LDFLAGS}}" -o {{.DIST}}/{{.BINARY}}.exe .
+      - CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "{{.LDFLAGS}}" -o {{.DIST}}/{{.BINARY}} .
+      - cp config.json rooms.txt {{.DIST}}/
+      - cd {{.DIST}} && zip -r {{.WIN}}.zip {{.BINARY}}.exe config.json rooms.txt
+      - cd {{.DIST}} && tar -czf {{.LIN}}.tar.gz {{.BINARY}} config.json rooms.txt
+
+  fmt:
+    cmds:
+      - gofmt -w .
+
+  vet:
+    cmds:
+      - go vet ./...
+
+  test:
+    cmds:
+      - go test ./...
+
+  tidy:
+    cmds:
+      - go mod tidy
+
+  clean-dist:
+    cmds:
+      - rm -rf {{.DIST}}
+
+  clean:
+    cmds:
+      - rm -f {{.BINARY}} {{.BINARY}}.exe
+      - rm -rf {{.DIST}}

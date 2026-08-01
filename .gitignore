@@ -1,4 +1,6 @@
-node_modules/
-/certs
-avatars
-package-lock.json
+/certs/
+/avatars/
+/token.txt
+/dist/
+/listenalong
+/listenalong.exe

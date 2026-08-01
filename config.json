@@ -4,5 +4,6 @@
     "rooms": "./rooms.txt",
     "avatarsDir": "./avatars",
     "cert": "./certs/cert.pem",
-    "key": "./certs/key.pem"
+    "key": "./certs/key.pem",
+    "adminToken": ""
 }
