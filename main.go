@@ -84,12 +84,16 @@ func run() error {
 		}
 	}
 
-	cert, renewed, err := certs.Ensure(cfg.CertPath(), cfg.KeyPath())
-	if err != nil {
-		return fmt.Errorf("tls: %w", err)
-	}
-	if renewed {
-		slog.Info("generated self-signed certificate", "cert", cfg.CertPath())
+	var cert tls.Certificate
+	if !cfg.NoTLS {
+		var renewed bool
+		cert, renewed, err = certs.Ensure(cfg.CertPath(), cfg.KeyPath())
+		if err != nil {
+			return fmt.Errorf("tls: %w", err)
+		}
+		if renewed {
+			slog.Info("generated self-signed certificate", "cert", cfg.CertPath())
+		}
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -100,21 +104,32 @@ func run() error {
 	go h.Heartbeat(ctx)
 
 	srv := &http.Server{
-		Addr:      net.JoinHostPort("", strconv.Itoa(cfg.Port)),
-		Handler:   h.Handler(ctx),
-		TLSConfig: &tls.Config{Certificates: []tls.Certificate{cert}},
+		Addr:    net.JoinHostPort("", strconv.Itoa(cfg.Port)),
+		Handler: h.Handler(ctx),
+	}
+	if !cfg.NoTLS {
+		srv.TLSConfig = &tls.Config{Certificates: []tls.Certificate{cert}}
 	}
 
 	go console.New(h, cfg).Run(ctx, os.Stdin, os.Stdout)
 
+	scheme := "wss"
+	if cfg.NoTLS {
+		scheme = "ws"
+	}
 	slog.Info("listening",
-		"url", fmt.Sprintf("wss://0.0.0.0:%d", cfg.Port),
+		"url", fmt.Sprintf("%s://0.0.0.0:%d", scheme, cfg.Port),
 		"name", cfg.Name,
 		"version", resolveVersion(),
 	)
 	errc := make(chan error, 1)
 	go func() {
-		err := srv.ListenAndServeTLS("", "")
+		var err error
+		if cfg.NoTLS {
+			err = srv.ListenAndServe()
+		} else {
+			err = srv.ListenAndServeTLS("", "")
+		}
 		if errors.Is(err, http.ErrServerClosed) {
 			err = nil
 		}

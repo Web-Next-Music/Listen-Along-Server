@@ -14,10 +14,11 @@ var (
 )
 
 type Config struct {
-	Port int    `json:"port"`
-	Name string `json:"name"`
-	Cert string `json:"cert"`
-	Key  string `json:"key"`
+	Port  int    `json:"port"`
+	Name  string `json:"name"`
+	Cert  string `json:"cert"`
+	Key   string `json:"key"`
+	NoTLS bool   `json:"noTLS"`
 }
 
 func init() {

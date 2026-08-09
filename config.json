@@ -3,5 +3,5 @@
     "name": "My Server",
     "cert": "./certs/cert.pem",
     "key": "./certs/key.pem",
-    "adminToken": ""
+    "noTLS": false
 }
