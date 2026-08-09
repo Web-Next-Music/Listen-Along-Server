@@ -35,9 +35,9 @@ tasks:
       - mkdir -p {{.DIST}}
       - CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags "{{.LDFLAGS}}" -o {{.DIST}}/{{.BINARY}}.exe .
       - CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "{{.LDFLAGS}}" -o {{.DIST}}/{{.BINARY}} .
-      - cp config.json rooms.txt {{.DIST}}/
-      - cd {{.DIST}} && zip -r {{.WIN}}.zip {{.BINARY}}.exe config.json rooms.txt
-      - cd {{.DIST}} && tar -czf {{.LIN}}.tar.gz {{.BINARY}} config.json rooms.txt
+      - cp config.json {{.DIST}}/
+      - cd {{.DIST}} && zip -r {{.WIN}}.zip {{.BINARY}}.exe config.json
+      - cd {{.DIST}} && tar -czf {{.LIN}}.tar.gz {{.BINARY}} config.json
 
   fmt:
     cmds:

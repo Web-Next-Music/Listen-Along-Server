@@ -15,12 +15,11 @@ import (
 	"syscall"
 	"time"
 
-	"listenalong/internal/avatar"
 	"listenalong/internal/certs"
 	"listenalong/internal/config"
 	"listenalong/internal/console"
+	"listenalong/internal/discordauth"
 	"listenalong/internal/hub"
-	"listenalong/internal/rooms"
 )
 
 var version = "dev"
@@ -37,7 +36,7 @@ Options:
 Config file: %s
 
 Console commands (stdin):
-  rooms | clients | state <room> | token | token regen | host <room> | <room> <trackId>
+  clients | state <room> | host <room> | <room> <trackId>
 `
 
 func main() {
@@ -85,14 +84,6 @@ func run() error {
 		}
 	}
 
-	generated, err := cfg.EnsureToken()
-	if err != nil {
-		return err
-	}
-	if generated {
-		slog.Info("generated admin token", "file", config.TokenPath)
-	}
-
 	cert, renewed, err := certs.Ensure(cfg.CertPath(), cfg.KeyPath())
 	if err != nil {
 		return fmt.Errorf("tls: %w", err)
@@ -104,19 +95,8 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	roomList := rooms.New(cfg.RoomsPath())
-	go roomList.Watch(ctx)
-
-	// An empty allow-list rejects every client with "unknown room", which
-	// looks like a client problem rather than a server one. Say so plainly,
-	// with the path that was actually read.
-	if len(roomList.All()) == 0 {
-		slog.Warn("no rooms configured - every connection will be rejected",
-			"roomsPath", cfg.RoomsPath(), "configDir", config.Dir)
-	}
-
-	avatars := avatar.NewStore(cfg.AvatarsPath())
-	h := hub.New(cfg.Name, cfg.AdminToken, roomList, avatars)
+	sessions := discordauth.NewStore()
+	h := hub.New(cfg.Name, resolveVersion(), sessions)
 	go h.Heartbeat(ctx)
 
 	srv := &http.Server{
@@ -125,17 +105,13 @@ func run() error {
 		TLSConfig: &tls.Config{Certificates: []tls.Certificate{cert}},
 	}
 
-	go console.New(h, cfg, roomList).Run(ctx, os.Stdin, os.Stdout)
+	go console.New(h, cfg).Run(ctx, os.Stdin, os.Stdout)
 
 	slog.Info("listening",
 		"url", fmt.Sprintf("wss://0.0.0.0:%d", cfg.Port),
 		"name", cfg.Name,
-		"rooms", roomList.All(),
 		"version", resolveVersion(),
 	)
-	slog.Info("admin token", "token", cfg.AdminToken,
-		"hint", "enter this in the client to become host")
-
 	errc := make(chan error, 1)
 	go func() {
 		err := srv.ListenAndServeTLS("", "")

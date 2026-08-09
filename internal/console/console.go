@@ -9,31 +9,24 @@ import (
 
 	"listenalong/internal/config"
 	"listenalong/internal/hub"
-	"listenalong/internal/protocol"
-	"listenalong/internal/rooms"
 )
 
 const help = `Commands:
-  rooms                  list allow-listed rooms
-  clients                list connected clients per room
+  clients                list connected clients per active room
   state <room>           show a room's playback state
-  token                  show the admin token
-  token regen            generate a new admin token
   host <room>            show who controls a room
-  <room> <trackId...>    force a room onto a track
+  <room> <trackId...>    force an active room onto a track
 `
 
 type Console struct {
-	hub  *hub.Hub
-	cfg  *config.Config
-	list *rooms.List
+	hub *hub.Hub
+	cfg *config.Config
 }
 
-func New(h *hub.Hub, cfg *config.Config, list *rooms.List) *Console {
-	return &Console{hub: h, cfg: cfg, list: list}
+func New(h *hub.Hub, cfg *config.Config) *Console {
+	return &Console{hub: h, cfg: cfg}
 }
 
-// Run reads commands until ctx is cancelled or stdin closes.
 func (c *Console) Run(ctx context.Context, in io.Reader, out io.Writer) {
 	scanner := bufio.NewScanner(in)
 	for scanner.Scan() {
@@ -56,11 +49,6 @@ func (c *Console) execute(line string, out io.Writer) {
 	switch cmd {
 	case "help", "?":
 		fmt.Fprint(out, help)
-
-	case "rooms":
-		for _, id := range c.list.All() {
-			fmt.Fprintf(out, "  %s\n", id)
-		}
 
 	case "clients":
 		snapshot := c.hub.Snapshot()
@@ -86,21 +74,6 @@ func (c *Console) execute(line string, out io.Writer) {
 		fmt.Fprintf(out, "  trackId=%s ugc=%t playing=%t position=%.1fs host=%s\n",
 			orNone(r.TrackID), r.IsUGC, r.Playing, r.Position, orNone(r.HostID))
 
-	case "token":
-		if len(args) == 1 && args[0] == "regen" {
-			tok, err := config.GenerateToken()
-			if err != nil {
-				fmt.Fprintf(out, "error: %v\n", err)
-				return
-			}
-			c.cfg.AdminToken = tok
-			c.hub.SetToken(tok)
-			if err := c.cfg.SaveToken(); err != nil {
-				fmt.Fprintf(out, "warning: token not persisted: %v\n", err)
-			}
-		}
-		fmt.Fprintf(out, "  admin token: %s\n", c.hub.Token())
-
 	case "host":
 		if len(args) != 1 {
 			fmt.Fprintln(out, "usage: host <room>")
@@ -118,12 +91,12 @@ func (c *Console) execute(line string, out io.Writer) {
 			fmt.Fprintf(out, "unknown command: %s (try `help`)\n", cmd)
 			return
 		}
-		if !c.list.Has(cmd) {
-			fmt.Fprintf(out, "room [%s] not found\n", cmd)
+		if _, ok := c.find(cmd); !ok {
+			fmt.Fprintf(out, "room [%s] is not active\n", cmd)
 			return
 		}
 		trackID := strings.Join(args, " ")
-		c.hub.Navigate(cmd, trackID, nil, protocol.ByServerAdmin)
+		c.hub.NavigateAdmin(cmd, trackID)
 		fmt.Fprintf(out, "  [%s] -> navigate: trackId=%s\n", cmd, trackID)
 	}
 }

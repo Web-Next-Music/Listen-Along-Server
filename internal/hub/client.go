@@ -6,7 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
-	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -15,10 +15,15 @@ import (
 	"listenalong/internal/protocol"
 )
 
+const maxIDLength = 64
+
+const maxDisplayNameLength = 40
+
+func hasUnsafePathChars(s string) bool {
+	return strings.ContainsAny(s, "/\\\x00") || s == "." || s == ".."
+}
+
 const (
-	// A ping every pingInterval, answered within pongTimeout, replaces the
-	// original server's complete lack of keepalive: dead sockets used to
-	// linger until TCP noticed.
 	pingInterval = 20 * time.Second
 	pongTimeout  = 15 * time.Second
 	writeTimeout = 10 * time.Second
@@ -27,8 +32,13 @@ const (
 )
 
 type Client struct {
-	id     string
 	roomID string
+
+	pendingRoomID string
+
+	discordUserID string
+	name          string
+	avatarURL     string
 
 	conn *websocket.Conn
 	hub  *Hub
@@ -38,8 +48,6 @@ type Client struct {
 	done   chan struct{}
 }
 
-// send queues msg. It never blocks: a client that cannot keep up is dropped,
-// so one stalled socket cannot wedge a broadcast.
 func (c *Client) send(msg any) {
 	data, err := json.Marshal(msg)
 	if err != nil {
@@ -49,7 +57,7 @@ func (c *Client) send(msg any) {
 	select {
 	case c.out <- data:
 	default:
-		slog.Warn("send buffer full, dropping client", "room", c.roomID, "client", c.id)
+		slog.Warn("send buffer full, dropping client", "room", c.roomID, "client", c.discordUserID)
 		c.shutdown()
 	}
 }
@@ -58,16 +66,14 @@ func (c *Client) shutdown() {
 	c.closed.Do(func() { close(c.done) })
 }
 
-// Handler upgrades HTTP requests and runs the client until it disconnects.
-// base bounds every connection to the server's lifetime.
+func (c *Client) kick() {
+	_ = c.conn.Close(protocol.CloseKicked, "Removed from room")
+	c.shutdown()
+}
+
 func (h *Hub) Handler(base context.Context) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		q := r.URL.Query()
-		roomID := q.Get("room")
-		clientID := q.Get("clientId")
-		if clientID == "" {
-			clientID = "client_" + strconv.FormatInt(time.Now().UnixMilli(), 10)
-		}
+		roomID := strings.TrimSpace(r.URL.Query().Get("room"))
 
 		conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
 			InsecureSkipVerify: true,
@@ -78,21 +84,18 @@ func (h *Hub) Handler(base context.Context) http.Handler {
 		}
 		conn.SetReadLimit(maxMessage)
 
-		// The room check happens after the upgrade so the client sees close
-		// code 4001 rather than an HTTP status; its reconnect loop keys on it.
-		if roomID == "" || !h.KnownRoom(roomID) {
-			slog.Warn("rejected unknown room", "room", roomID, "client", clientID)
+		if roomID != "" && (len(roomID) > maxIDLength || hasUnsafePathChars(roomID)) {
+			slog.Warn("rejected malformed room id", "room", roomID)
 			_ = conn.Close(protocol.CloseRoomNotFound, "Room not found")
 			return
 		}
 
 		c := &Client{
-			id:     clientID,
-			roomID: roomID,
-			conn:   conn,
-			hub:    h,
-			out:    make(chan []byte, sendBuffer),
-			done:   make(chan struct{}),
+			pendingRoomID: roomID,
+			conn:          conn,
+			hub:           h,
+			out:           make(chan []byte, sendBuffer),
+			done:          make(chan struct{}),
 		}
 
 		c.run(base)
@@ -103,9 +106,7 @@ func (c *Client) run(base context.Context) {
 	ctx, cancel := context.WithCancel(base)
 	defer cancel()
 
-	for _, msg := range c.hub.join(c) {
-		c.send(msg)
-	}
+	c.hub.EnterBrowsing(c)
 
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -121,7 +122,10 @@ func (c *Client) run(base context.Context) {
 	}()
 
 	wg.Wait()
-	c.hub.leave(c)
+	if c.roomID != "" {
+		c.hub.leave(c)
+	}
+	c.hub.ExitBrowsing(c)
 	_ = c.conn.CloseNow()
 }
 
@@ -143,13 +147,11 @@ func (c *Client) writeLoop(ctx context.Context) {
 				return
 			}
 		case <-ticker.C:
-			// Ping blocks until the pong comes back, so a peer that has gone
-			// away without closing is detected here rather than never.
 			pctx, cancel := context.WithTimeout(ctx, pongTimeout)
 			err := c.conn.Ping(pctx)
 			cancel()
 			if err != nil {
-				slog.Debug("ping failed", "client", c.id, "err", err)
+				slog.Debug("ping failed", "client", c.discordUserID, "err", err)
 				return
 			}
 		}
@@ -163,7 +165,7 @@ func (c *Client) readLoop(ctx context.Context) {
 			if !errors.Is(err, context.Canceled) &&
 				websocket.CloseStatus(err) == -1 &&
 				ctx.Err() == nil {
-				slog.Debug("read", "client", c.id, "err", err)
+				slog.Debug("read", "client", c.discordUserID, "err", err)
 			}
 			return
 		}
@@ -189,9 +191,52 @@ func (c *Client) dispatch(ctx context.Context, msg protocol.Inbound) {
 	switch msg.Type {
 	case protocol.TypeAuth:
 		c.hub.authenticate(c, msg.Token)
+		return
 
+	case protocol.TypeDiscordToken:
+		if msg.AccessToken == "" {
+			c.send(protocol.NewError(protocol.ErrBadRequest, "accessToken required"))
+			return
+		}
+		go c.hub.DiscordTokenAuth(ctx, c, msg.AccessToken)
+		return
+
+	case protocol.TypeListRooms:
+		c.send(protocol.RoomList{Type: protocol.TypeRoomList, Rooms: c.hub.ListRooms()})
+		return
+
+	case protocol.TypeCreateRoom:
+		c.hub.CreateRoom(c, msg.Name)
+		return
+
+	case protocol.TypeJoinRoom:
+		if msg.TargetID == "" {
+			c.send(protocol.NewError(protocol.ErrBadRequest, "targetId required"))
+			return
+		}
+		c.hub.JoinRoom(c, msg.TargetID)
+		return
+	}
+
+	if c.roomID == "" {
+		c.send(protocol.NewError(protocol.ErrBadRequest, "sign in with Discord to get a room first"))
+		return
+	}
+
+	switch msg.Type {
 	case protocol.TypeAvatarURL:
-		go c.handleAvatar(ctx, msg.URL)
+		c.name = strings.TrimSpace(msg.Name)
+		if len(c.name) > maxDisplayNameLength {
+			c.name = c.name[:maxDisplayNameLength]
+		}
+		c.avatarURL = msg.URL
+		c.hub.broadcastAvatar(c.roomID, c.discordUserID, c.name, c.avatarURL)
+
+	case protocol.TypeSetRoomName:
+		c.hub.SetRoomName(c, msg.Name)
+
+	case protocol.TypeLeaveRoom:
+		c.hub.LeaveRoom(c)
 
 	case protocol.TypeNavigate:
 		if !c.requireHost() {
@@ -201,7 +246,7 @@ func (c *Client) dispatch(ctx context.Context, msg protocol.Inbound) {
 			c.send(protocol.NewError(protocol.ErrBadRequest, "trackId required"))
 			return
 		}
-		c.hub.Navigate(c.roomID, msg.TrackID, msg.UGC, c.id)
+		c.hub.Navigate(c.roomID, msg.TrackID, msg.UGC, c)
 
 	case protocol.TypePlayState:
 		if !c.requireHost() {
@@ -211,7 +256,7 @@ func (c *Client) dispatch(ctx context.Context, msg protocol.Inbound) {
 			c.send(protocol.NewError(protocol.ErrBadRequest, "playing required"))
 			return
 		}
-		c.hub.setPlaying(c.roomID, *msg.Playing, c.id)
+		c.hub.setPlaying(c.roomID, *msg.Playing, c)
 
 	case protocol.TypeSeek:
 		if !c.requireHost() {
@@ -221,7 +266,20 @@ func (c *Client) dispatch(ctx context.Context, msg protocol.Inbound) {
 			c.send(protocol.NewError(protocol.ErrBadRequest, "position required"))
 			return
 		}
-		c.hub.seek(c.roomID, *msg.Position, c.id)
+		c.hub.seek(c.roomID, *msg.Position, c)
+
+	case protocol.TypeChatMessage:
+		c.hub.chatMessage(c, msg.Text)
+
+	case protocol.TypeTransferHost:
+		if !c.requireHost() {
+			return
+		}
+		if msg.TargetID == "" {
+			c.send(protocol.NewError(protocol.ErrBadRequest, "targetId required"))
+			return
+		}
+		c.hub.TransferHost(c.roomID, c, msg.TargetID)
 
 	default:
 		c.send(protocol.NewError(protocol.ErrBadRequest, "unknown message type: "+msg.Type))
@@ -234,14 +292,4 @@ func (c *Client) requireHost() bool {
 	}
 	c.send(protocol.NewError(protocol.ErrNotHost, "only the host can control playback"))
 	return false
-}
-
-func (c *Client) handleAvatar(ctx context.Context, url string) {
-	data, err := c.hub.avatars.FetchAndStore(ctx, c.roomID, c.id, url)
-	if err != nil {
-		slog.Warn("avatar", "client", c.id, "err", err)
-		c.send(protocol.NewError(protocol.ErrAvatarFetch, err.Error()))
-		return
-	}
-	c.hub.broadcastAvatar(c.roomID, c.id, data)
 }

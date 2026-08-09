@@ -1,8 +1,6 @@
 {
     "port": 7080,
     "name": "My Server",
-    "rooms": "./rooms.txt",
-    "avatarsDir": "./avatars",
     "cert": "./certs/cert.pem",
     "key": "./certs/key.pem",
     "adminToken": ""
