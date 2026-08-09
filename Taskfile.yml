@@ -3,6 +3,7 @@ version: '3'
 vars:
   BINARY: listenalong
   DIST: dist
+  RELEASE: release
   VERSION:
     sh: git describe --tags --always --dirty 2>/dev/null || echo dev
   LDFLAGS: -s -w -X main.version={{.VERSION}}
@@ -17,7 +18,10 @@ tasks:
 
   build:
     cmds:
-      - go build -ldflags "{{.LDFLAGS}}" -o {{.BINARY}} .
+      - rm -rf {{.RELEASE}}
+      - mkdir -p {{.RELEASE}}
+      - CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "{{.LDFLAGS}}" -o {{.RELEASE}}/{{.BINARY}}-linux-amd64 .
+      - CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags "{{.LDFLAGS}}" -o {{.RELEASE}}/{{.BINARY}}-win-amd64.exe .
 
   build-windows:
     env:
@@ -29,7 +33,7 @@ tasks:
   dist:
     deps: [clean-dist]
     vars:
-      WIN: "{{.BINARY}}-{{.VERSION}}-windows-amd64"
+      WIN: "{{.BINARY}}-{{.VERSION}}-win-amd64"
       LIN: "{{.BINARY}}-{{.VERSION}}-linux-amd64"
     cmds:
       - mkdir -p {{.DIST}}
@@ -63,3 +67,4 @@ tasks:
     cmds:
       - rm -f {{.BINARY}} {{.BINARY}}.exe
       - rm -rf {{.DIST}}
+      - rm -rf {{.RELEASE}}
