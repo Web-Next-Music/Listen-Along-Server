@@ -615,26 +615,30 @@ func (h *Hub) appendSystemMessageLocked(r *room, roomID, text string) {
 	h.broadcastLocked(r, sysMsg, nil)
 }
 
-func (h *Hub) Navigate(roomID, trackID string, ugc *protocol.UGC, by *Client) {
-	h.navigate(roomID, trackID, ugc, by.discordUserID, by)
+func (h *Hub) Navigate(roomID, trackID string, ugc *protocol.UGC, position *float64, by *Client) {
+	h.navigate(roomID, trackID, ugc, position, by.discordUserID, by)
 }
 
 func (h *Hub) NavigateAdmin(roomID, trackID string) {
-	h.navigate(roomID, trackID, nil, protocol.ByServerAdmin, nil)
+	h.navigate(roomID, trackID, nil, nil, protocol.ByServerAdmin, nil)
 }
 
-func (h *Hub) navigate(roomID, trackID string, ugc *protocol.UGC, by string, exclude *Client) {
+func (h *Hub) navigate(roomID, trackID string, ugc *protocol.UGC, position *float64, by string, exclude *Client) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
 	r := h.room(roomID)
 	r.state.trackID = trackID
 	r.state.ugc = ugc
-	r.state.position = 0
+	if position != nil && *position >= 0 {
+		r.state.position = *position
+	} else {
+		r.state.position = 0
+	}
 	r.state.positionSetAt = time.Now()
 	r.state.playing = true
 
-	slog.Info("navigate", "room", roomID, "by", by, "trackId", trackID, "ugc", ugc != nil)
+	slog.Info("navigate", "room", roomID, "by", by, "trackId", trackID, "ugc", ugc != nil, "position", r.state.position)
 	h.broadcastLocked(r, h.stateSyncLocked(r, by), exclude)
 }
 

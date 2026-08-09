@@ -246,7 +246,7 @@ func (c *Client) dispatch(ctx context.Context, msg protocol.Inbound) {
 			c.send(protocol.NewError(protocol.ErrBadRequest, "trackId required"))
 			return
 		}
-		c.hub.Navigate(c.roomID, msg.TrackID, msg.UGC, c)
+		c.hub.Navigate(c.roomID, msg.TrackID, msg.UGC, msg.Position, c)
 
 	case protocol.TypePlayState:
 		if !c.requireHost() {
