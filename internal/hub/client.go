@@ -281,6 +281,16 @@ func (c *Client) dispatch(ctx context.Context, msg protocol.Inbound) {
 		}
 		c.hub.TransferHost(c.roomID, c, msg.TargetID)
 
+	case protocol.TypeQueueSync:
+		if !c.requireHost() {
+			return
+		}
+		queueIndex := 0
+		if msg.QueueIndex != nil {
+			queueIndex = *msg.QueueIndex
+		}
+		c.hub.queueSync(c.roomID, msg.Queue, queueIndex, c.discordUserID, c)
+
 	default:
 		c.send(protocol.NewError(protocol.ErrBadRequest, "unknown message type: "+msg.Type))
 	}

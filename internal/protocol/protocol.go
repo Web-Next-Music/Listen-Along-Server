@@ -16,6 +16,7 @@ const (
 	TypeCreateRoom   = "create_room"
 	TypeLeaveRoom    = "leave_room"
 	TypeJoinRoom     = "join_room"
+	TypeQueueSync    = "queue_sync"
 )
 
 const (
@@ -58,19 +59,26 @@ type UGC struct {
 	Cover  string `json:"c,omitempty"`
 }
 
+type QueueEntry struct {
+	TrackID string `json:"trackId"`
+	UGC     *UGC   `json:"ugc,omitempty"`
+}
+
 type Inbound struct {
-	Type        string   `json:"type"`
-	RoomID      string   `json:"roomId,omitempty"`
-	Token       string   `json:"token,omitempty"`
-	URL         string   `json:"url,omitempty"`
-	TrackID     string   `json:"trackId,omitempty"`
-	UGC         *UGC     `json:"ugc,omitempty"`
-	Playing     *bool    `json:"playing,omitempty"`
-	Position    *float64 `json:"position,omitempty"`
-	Text        string   `json:"text,omitempty"`
-	TargetID    string   `json:"targetId,omitempty"`
-	AccessToken string   `json:"accessToken,omitempty"`
-	Name        string   `json:"name,omitempty"`
+	Type        string       `json:"type"`
+	RoomID      string       `json:"roomId,omitempty"`
+	Token       string       `json:"token,omitempty"`
+	URL         string       `json:"url,omitempty"`
+	TrackID     string       `json:"trackId,omitempty"`
+	UGC         *UGC         `json:"ugc,omitempty"`
+	Playing     *bool        `json:"playing,omitempty"`
+	Position    *float64     `json:"position,omitempty"`
+	Text        string       `json:"text,omitempty"`
+	TargetID    string       `json:"targetId,omitempty"`
+	AccessToken string       `json:"accessToken,omitempty"`
+	Name        string       `json:"name,omitempty"`
+	Queue       []QueueEntry `json:"queue,omitempty"`
+	QueueIndex  *int         `json:"queueIndex,omitempty"`
 }
 
 type ServerInfo struct {
@@ -141,6 +149,14 @@ type StateSync struct {
 	Position   float64 `json:"position"`
 	ServerTime int64   `json:"serverTime"`
 	By         string  `json:"by"`
+}
+
+type QueueSync struct {
+	Type       string       `json:"type"`
+	Queue      []QueueEntry `json:"queue"`
+	QueueIndex int          `json:"queueIndex"`
+	ServerTime int64        `json:"serverTime"`
+	By         string       `json:"by"`
 }
 
 type ChatMessage struct {

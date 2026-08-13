@@ -28,6 +28,8 @@ type state struct {
 	playing       bool
 	position      float64
 	positionSetAt time.Time
+	queue         []protocol.QueueEntry
+	queueIndex    int
 }
 
 func (s *state) currentPosition() float64 {
@@ -162,6 +164,16 @@ func (h *Hub) joinLocked(c *Client) []any {
 
 	if r.state.trackID != "" {
 		out = append(out, h.stateSyncLocked(r, protocol.ByServer))
+	}
+
+	if len(r.state.queue) > 0 {
+		out = append(out, protocol.QueueSync{
+			Type:       protocol.TypeQueueSync,
+			Queue:      r.state.queue,
+			QueueIndex: r.state.queueIndex,
+			ServerTime: time.Now().UnixMilli(),
+			By:         protocol.ByServer,
+		})
 	}
 
 	if len(r.chatHistory) > 0 {
@@ -640,6 +652,24 @@ func (h *Hub) navigate(roomID, trackID string, ugc *protocol.UGC, position *floa
 
 	slog.Info("navigate", "room", roomID, "by", by, "trackId", trackID, "ugc", ugc != nil, "position", r.state.position)
 	h.broadcastLocked(r, h.stateSyncLocked(r, by), exclude)
+}
+
+func (h *Hub) queueSync(roomID string, queue []protocol.QueueEntry, queueIndex int, by string, exclude *Client) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	r := h.room(roomID)
+	r.state.queue = queue
+	r.state.queueIndex = queueIndex
+
+	slog.Info("queue_sync", "room", roomID, "by", by, "len", len(queue))
+	h.broadcastLocked(r, protocol.QueueSync{
+		Type:       protocol.TypeQueueSync,
+		Queue:      queue,
+		QueueIndex: queueIndex,
+		ServerTime: time.Now().UnixMilli(),
+		By:         by,
+	}, exclude)
 }
 
 func (h *Hub) setPlaying(roomID string, playing bool, by *Client) {
