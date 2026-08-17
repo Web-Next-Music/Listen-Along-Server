@@ -189,7 +189,12 @@ func run() error {
 	defer stop()
 
 	sessions := discordauth.NewStore()
-	h := hub.New(cfg.Name, cfg.Description, cfg.ServerCoverURL, resolveVersion(), sessions)
+	h := hub.New(hub.Meta{
+		Name:        cfg.Name,
+		Description: cfg.Description,
+		Cover:       cfg.ServerCoverURL,
+		Version:     resolveVersion(),
+	}, sessions)
 	h.SetVersionRange(cfg.MinClientVersion, cfg.MaxClientVersion, cfg.DevMode)
 	go h.Heartbeat(ctx)
 
@@ -231,8 +236,8 @@ func run() error {
 
 func applyPatch(rt *serverRuntime, h *hub.Hub, mux http.Handler) func(adminapi.Patch) (*config.Config, error) {
 	return func(p adminapi.Patch) (*config.Config, error) {
-		cfg := rt.currentConfig()
-		needsRebind := false
+		old := rt.currentConfig()
+		cfg := old.Clone()
 
 		if p.Name != nil {
 			cfg.Name = *p.Name
@@ -252,25 +257,23 @@ func applyPatch(rt *serverRuntime, h *hub.Hub, mux http.Handler) func(adminapi.P
 		if p.DevMode != nil {
 			cfg.DevMode = *p.DevMode
 		}
-		if p.Port != nil && *p.Port != cfg.Port {
+		if p.Port != nil {
 			if *p.Port < 1 || *p.Port > 65535 {
 				return nil, fmt.Errorf("invalid port")
 			}
 			cfg.Port = *p.Port
-			needsRebind = true
 		}
-		if p.NoTLS != nil && *p.NoTLS != cfg.NoTLS {
+		if p.NoTLS != nil {
 			cfg.NoTLS = *p.NoTLS
-			needsRebind = true
 		}
-		if p.Cert != nil && *p.Cert != cfg.Cert {
+		if p.Cert != nil {
 			cfg.Cert = *p.Cert
-			needsRebind = true
 		}
-		if p.Key != nil && *p.Key != cfg.Key {
+		if p.Key != nil {
 			cfg.Key = *p.Key
-			needsRebind = true
 		}
+
+		needsRebind := configNeedsRebind(old, cfg)
 
 		if err := cfg.Save(); err != nil {
 			return nil, err

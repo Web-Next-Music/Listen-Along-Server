@@ -3,13 +3,64 @@ package adminapi
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"listenalong/internal/config"
 )
+
+const allowedOrigin = "https://nm.diram1x.ru"
+
+func isAllowedOrigin(origin string) bool {
+	if origin == allowedOrigin {
+		return true
+	}
+	return strings.HasPrefix(origin, "http://localhost:") ||
+		strings.HasPrefix(origin, "http://127.0.0.1:")
+}
+
+const (
+	maxNameLen        = 100
+	maxDescriptionLen = 2000
+	maxURLLen         = 2000
+	maxPathLen        = 500
+)
+
+const userCacheTTL = 30 * time.Second
+
+var (
+	userCacheMu sync.Mutex
+	userCache   = map[string]cachedUser{}
+)
+
+type cachedUser struct {
+	id      int64
+	expires time.Time
+}
+
+func cachedGithubUser(ctx context.Context, token string, fetch func(context.Context, string) (int64, error)) (int64, error) {
+	userCacheMu.Lock()
+	if c, ok := userCache[token]; ok && time.Now().Before(c.expires) {
+		userCacheMu.Unlock()
+		return c.id, nil
+	}
+	userCacheMu.Unlock()
+
+	id, err := fetch(ctx, token)
+	if err != nil || id == 0 {
+		return id, err
+	}
+
+	userCacheMu.Lock()
+	userCache[token] = cachedUser{id: id, expires: time.Now().Add(userCacheTTL)}
+	userCacheMu.Unlock()
+
+	return id, nil
+}
 
 type View struct {
 	Name               string  `json:"name"`
@@ -38,6 +89,31 @@ type Patch struct {
 	Key              *string `json:"key"`
 }
 
+func (p Patch) validate() error {
+	if p.Name != nil && len(*p.Name) > maxNameLen {
+		return fmt.Errorf("name too long")
+	}
+	if p.Description != nil && len(*p.Description) > maxDescriptionLen {
+		return fmt.Errorf("description too long")
+	}
+	if p.ServerCoverURL != nil && *p.ServerCoverURL != "" {
+		if len(*p.ServerCoverURL) > maxURLLen {
+			return fmt.Errorf("cover url too long")
+		}
+		if !strings.HasPrefix(*p.ServerCoverURL, "http://") &&
+			!strings.HasPrefix(*p.ServerCoverURL, "https://") {
+			return fmt.Errorf("cover url must be http(s)")
+		}
+	}
+	if p.Cert != nil && len(*p.Cert) > maxPathLen {
+		return fmt.Errorf("cert path too long")
+	}
+	if p.Key != nil && len(*p.Key) > maxPathLen {
+		return fmt.Errorf("key path too long")
+	}
+	return nil
+}
+
 type Options struct {
 	CurrentConfig func() *config.Config
 	Apply         func(Patch) (*config.Config, error)
@@ -51,8 +127,7 @@ func New(opts Options) http.Handler {
 	}
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		origin := r.Header.Get("Origin")
-		if origin != "" {
+		if origin := r.Header.Get("Origin"); isAllowedOrigin(origin) {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Vary", "Origin")
 			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
@@ -78,7 +153,7 @@ func New(opts Options) http.Handler {
 		ctx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
 		defer cancel()
 
-		userID, err := githubUser(ctx, token)
+		userID, err := cachedGithubUser(ctx, token, githubUser)
 		if err != nil || userID == 0 {
 			opaqueNotFound(w)
 			return
@@ -104,6 +179,11 @@ func New(opts Options) http.Handler {
 		var patch Patch
 		if err := json.Unmarshal(body, &patch); err != nil {
 			opaqueNotFound(w)
+			return
+		}
+
+		if err := patch.validate(); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
 

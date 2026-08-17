@@ -70,12 +70,19 @@ type Hub struct {
 	devMode          bool
 }
 
-func New(name, description, cover, version string, sessions *discordauth.Store) *Hub {
+type Meta struct {
+	Name        string
+	Description string
+	Cover       string
+	Version     string
+}
+
+func New(meta Meta, sessions *discordauth.Store) *Hub {
 	return &Hub{
-		name:        name,
-		description: description,
-		cover:       cover,
-		version:     version,
+		name:        meta.Name,
+		description: meta.Description,
+		cover:       meta.Cover,
+		version:     meta.Version,
 		sessions:    sessions,
 		m:           map[string]*room{},
 		roomByUser:  map[string]string{},

@@ -6,11 +6,14 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 var (
 	Dir  string
 	Path string
+
+	fileMu sync.Mutex
 )
 
 type Config struct {
@@ -68,6 +71,9 @@ func Default() *Config {
 }
 
 func Load() (*Config, bool, error) {
+	fileMu.Lock()
+	defer fileMu.Unlock()
+
 	cfg := Default()
 
 	data, err := os.ReadFile(Path)
@@ -86,11 +92,20 @@ func Load() (*Config, bool, error) {
 }
 
 func (c *Config) Save() error {
+	fileMu.Lock()
+	defer fileMu.Unlock()
+
 	data, err := json.MarshalIndent(c, "", "    ")
 	if err != nil {
 		return fmt.Errorf("encode config: %w", err)
 	}
-	if err := os.WriteFile(Path, append(data, '\n'), 0o644); err != nil {
+	data = append(data, '\n')
+
+	tmp := Path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		return fmt.Errorf("write config: %w", err)
+	}
+	if err := os.Rename(tmp, Path); err != nil {
 		return fmt.Errorf("write config: %w", err)
 	}
 	return nil
