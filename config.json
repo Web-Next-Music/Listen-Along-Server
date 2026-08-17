@@ -3,5 +3,11 @@
     "name": "My Server",
     "cert": "./certs/cert.pem",
     "key": "./certs/key.pem",
-    "noTLS": false
+    "noTLS": false,
+    "description": "",
+    "serverCoverUrl": "",
+    "minClientVersion": "",
+    "maxClientVersion": "",
+    "adminGithubUserIds": null,
+    "devMode": false
 }

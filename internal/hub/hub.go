@@ -55,24 +55,70 @@ type room struct {
 }
 
 type Hub struct {
-	name     string
-	version  string
-	sessions *discordauth.Store
+	name        string
+	description string
+	cover       string
+	version     string
+	sessions    *discordauth.Store
 
-	mu         sync.Mutex
-	m          map[string]*room
-	roomByUser map[string]string
-	browsers   map[*Client]struct{}
+	mu               sync.Mutex
+	m                map[string]*room
+	roomByUser       map[string]string
+	browsers         map[*Client]struct{}
+	minClientVersion string
+	maxClientVersion string
+	devMode          bool
 }
 
-func New(name, version string, sessions *discordauth.Store) *Hub {
+func New(name, description, cover, version string, sessions *discordauth.Store) *Hub {
 	return &Hub{
-		name:       name,
-		version:    version,
-		sessions:   sessions,
-		m:          map[string]*room{},
-		roomByUser: map[string]string{},
-		browsers:   map[*Client]struct{}{},
+		name:        name,
+		description: description,
+		cover:       cover,
+		version:     version,
+		sessions:    sessions,
+		m:           map[string]*room{},
+		roomByUser:  map[string]string{},
+		browsers:    map[*Client]struct{}{},
+	}
+}
+
+func (h *Hub) SetVersionRange(minVersion, maxVersion string, devMode bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.minClientVersion = minVersion
+	h.maxClientVersion = maxVersion
+	h.devMode = devMode
+}
+
+func (h *Hub) VersionRange() (minVersion, maxVersion string, devMode bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.minClientVersion, h.maxClientVersion, h.devMode
+}
+
+func (h *Hub) UpdateMeta(name, description, cover string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.name = name
+	h.description = description
+	h.cover = cover
+
+	for roomID, r := range h.m {
+		info := protocol.ServerInfo{
+			Type:             protocol.TypeServerInfo,
+			Name:             h.name,
+			Description:      h.description,
+			Cover:            h.cover,
+			Version:          h.version,
+			MinClientVersion: h.minClientVersion,
+			MaxClientVersion: h.maxClientVersion,
+			Protocol:         protocol.Version,
+			HostID:           hostIDOf(r),
+			RoomID:           roomID,
+			RoomName:         r.name,
+		}
+		h.broadcastLocked(r, info, nil)
 	}
 }
 
@@ -139,14 +185,18 @@ func (h *Hub) joinLocked(c *Client) []any {
 	}, c)
 
 	out := []any{protocol.ServerInfo{
-		Type:          protocol.TypeServerInfo,
-		Name:          h.name,
-		Version:       h.version,
-		Protocol:      protocol.Version,
-		HostID:        hostID,
-		RoomID:        c.roomID,
-		DiscordUserID: c.discordUserID,
-		RoomName:      r.name,
+		Type:             protocol.TypeServerInfo,
+		Name:             h.name,
+		Description:      h.description,
+		Cover:            h.cover,
+		Version:          h.version,
+		MinClientVersion: h.minClientVersion,
+		MaxClientVersion: h.maxClientVersion,
+		Protocol:         protocol.Version,
+		HostID:           hostID,
+		RoomID:           c.roomID,
+		DiscordUserID:    c.discordUserID,
+		RoomName:         r.name,
 	}}
 
 	for member := range r.clients {

@@ -19,6 +19,13 @@ type Config struct {
 	Cert  string `json:"cert"`
 	Key   string `json:"key"`
 	NoTLS bool   `json:"noTLS"`
+
+	Description        string  `json:"description"`
+	ServerCoverURL     string  `json:"serverCoverUrl"`
+	MinClientVersion   string  `json:"minClientVersion"`
+	MaxClientVersion   string  `json:"maxClientVersion"`
+	AdminGithubUserIDs []int64 `json:"adminGithubUserIds"`
+	DevMode            bool    `json:"devMode"`
 }
 
 func init() {
@@ -98,3 +105,21 @@ func (c *Config) Resolve(p string) string {
 
 func (c *Config) CertPath() string { return c.Resolve(c.Cert) }
 func (c *Config) KeyPath() string  { return c.Resolve(c.Key) }
+
+func (c *Config) Clone() *Config {
+	clone := *c
+	clone.AdminGithubUserIDs = append([]int64(nil), c.AdminGithubUserIDs...)
+	return &clone
+}
+
+func (c *Config) IsAdmin(githubUserID int64) bool {
+	if githubUserID == 0 {
+		return false
+	}
+	for _, id := range c.AdminGithubUserIDs {
+		if id == githubUserID {
+			return true
+		}
+	}
+	return false
+}

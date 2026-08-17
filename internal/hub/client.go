@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"golang.org/x/mod/semver"
 
 	"listenalong/internal/protocol"
 )
@@ -71,9 +72,68 @@ func (c *Client) kick() {
 	c.shutdown()
 }
 
+func normalizeSemver(v string) string {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return ""
+	}
+	if !strings.HasPrefix(v, "v") {
+		v = "v" + v
+	}
+	if !semver.IsValid(v) {
+		return ""
+	}
+	return v
+}
+
+func versionRangeText(minVersion, maxVersion string) string {
+	switch {
+	case minVersion != "" && maxVersion != "":
+		return minVersion + "-" + maxVersion
+	case minVersion != "":
+		return minVersion + "+"
+	case maxVersion != "":
+		return "up to " + maxVersion
+	default:
+		return ""
+	}
+}
+
+const devClientVersion = "0.0"
+
+func (h *Hub) checkClientVersion(clientVersion string) (ok bool, reason string) {
+	minVersion, maxVersion, devMode := h.VersionRange()
+
+	if clientVersion == devClientVersion {
+		if devMode {
+			return true, ""
+		}
+		return false, "Client version not supported (dev builds are disabled on this server)"
+	}
+
+	if minVersion == "" && maxVersion == "" {
+		return true, ""
+	}
+
+	rangeText := versionRangeText(minVersion, maxVersion)
+
+	cv := normalizeSemver(clientVersion)
+	if cv == "" {
+		return false, "Client version not supported (requires " + rangeText + ")"
+	}
+	if minV := normalizeSemver(minVersion); minV != "" && semver.Compare(cv, minV) < 0 {
+		return false, "Client version too old (requires " + rangeText + ")"
+	}
+	if maxV := normalizeSemver(maxVersion); maxV != "" && semver.Compare(cv, maxV) > 0 {
+		return false, "Client version too new (requires " + rangeText + ")"
+	}
+	return true, ""
+}
+
 func (h *Hub) Handler(base context.Context) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		roomID := strings.TrimSpace(r.URL.Query().Get("room"))
+		clientVersion := strings.TrimSpace(r.URL.Query().Get("v"))
 
 		conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
 			InsecureSkipVerify: true,
@@ -83,6 +143,12 @@ func (h *Hub) Handler(base context.Context) http.Handler {
 			return
 		}
 		conn.SetReadLimit(maxMessage)
+
+		if ok, reason := h.checkClientVersion(clientVersion); !ok {
+			slog.Warn("rejected unsupported client version", "version", clientVersion)
+			_ = conn.Close(protocol.CloseVersionUnsupported, reason)
+			return
+		}
 
 		if roomID != "" && (len(roomID) > maxIDLength || hasUnsafePathChars(roomID)) {
 			slog.Warn("rejected malformed room id", "room", roomID)

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -12,9 +13,11 @@ import (
 	"os/signal"
 	"runtime/debug"
 	"strconv"
+	"sync"
 	"syscall"
 	"time"
 
+	"listenalong/internal/adminapi"
 	"listenalong/internal/certs"
 	"listenalong/internal/config"
 	"listenalong/internal/console"
@@ -72,6 +75,104 @@ func main() {
 	}
 }
 
+type serverRuntime struct {
+	mu  sync.Mutex
+	cfg *config.Config
+	srv *http.Server
+	ln  net.Listener
+}
+
+func (rt *serverRuntime) currentConfig() *config.Config {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	return rt.cfg.Clone()
+}
+
+func bind(cfg *config.Config, mux http.Handler) (*http.Server, net.Listener, error) {
+	ln, err := net.Listen("tcp", net.JoinHostPort("", strconv.Itoa(cfg.Port)))
+	if err != nil {
+		return nil, nil, fmt.Errorf("listen: %w", err)
+	}
+
+	srv := &http.Server{Handler: mux}
+	if !cfg.NoTLS {
+		cert, renewed, err := certs.Ensure(cfg.CertPath(), cfg.KeyPath())
+		if err != nil {
+			ln.Close()
+			return nil, nil, fmt.Errorf("tls: %w", err)
+		}
+		if renewed {
+			slog.Info("generated self-signed certificate", "cert", cfg.CertPath())
+		}
+		srv.TLSConfig = &tls.Config{Certificates: []tls.Certificate{cert}}
+	}
+
+	return srv, ln, nil
+}
+
+func serve(srv *http.Server, ln net.Listener, noTLS bool) {
+	var err error
+	if noTLS {
+		err = srv.Serve(ln)
+	} else {
+		err = srv.ServeTLS(ln, "", "")
+	}
+	if err != nil && !errors.Is(err, http.ErrServerClosed) {
+		slog.Error("listener stopped", "err", err)
+	}
+}
+
+func (rt *serverRuntime) start(cfg *config.Config, mux http.Handler) error {
+	srv, ln, err := bind(cfg, mux)
+	if err != nil {
+		return err
+	}
+
+	rt.mu.Lock()
+	rt.cfg = cfg
+	rt.srv = srv
+	rt.ln = ln
+	rt.mu.Unlock()
+
+	go serve(srv, ln, cfg.NoTLS)
+	return nil
+}
+
+func (rt *serverRuntime) rebind(cfg *config.Config, mux http.Handler) error {
+	srv, ln, err := bind(cfg, mux)
+	if err != nil {
+		return err
+	}
+
+	rt.mu.Lock()
+	oldSrv := rt.srv
+	rt.cfg = cfg
+	rt.srv = srv
+	rt.ln = ln
+	rt.mu.Unlock()
+
+	go serve(srv, ln, cfg.NoTLS)
+
+	if oldSrv != nil {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = oldSrv.Shutdown(shutdownCtx)
+	}
+	return nil
+}
+
+func (rt *serverRuntime) shutdown() {
+	rt.mu.Lock()
+	srv := rt.srv
+	rt.mu.Unlock()
+	if srv == nil {
+		return
+	}
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = srv.Shutdown(shutdownCtx)
+}
+
 func run() error {
 	cfg, existed, err := config.Load()
 	if err != nil {
@@ -84,34 +185,30 @@ func run() error {
 		}
 	}
 
-	var cert tls.Certificate
-	if !cfg.NoTLS {
-		var renewed bool
-		cert, renewed, err = certs.Ensure(cfg.CertPath(), cfg.KeyPath())
-		if err != nil {
-			return fmt.Errorf("tls: %w", err)
-		}
-		if renewed {
-			slog.Info("generated self-signed certificate", "cert", cfg.CertPath())
-		}
-	}
-
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	sessions := discordauth.NewStore()
-	h := hub.New(cfg.Name, resolveVersion(), sessions)
+	h := hub.New(cfg.Name, cfg.Description, cfg.ServerCoverURL, resolveVersion(), sessions)
+	h.SetVersionRange(cfg.MinClientVersion, cfg.MaxClientVersion, cfg.DevMode)
 	go h.Heartbeat(ctx)
 
-	srv := &http.Server{
-		Addr:    net.JoinHostPort("", strconv.Itoa(cfg.Port)),
-		Handler: h.Handler(ctx),
-	}
-	if !cfg.NoTLS {
-		srv.TLSConfig = &tls.Config{Certificates: []tls.Certificate{cert}}
+	rt := &serverRuntime{}
+
+	mux := http.NewServeMux()
+	mux.Handle("/", h.Handler(ctx))
+	mux.Handle("/api/admin/settings", adminapi.New(adminapi.Options{
+		CurrentConfig: rt.currentConfig,
+		Apply:         applyPatch(rt, h, mux),
+	}))
+	mux.Handle("/api/info", publicInfoHandler(rt))
+
+	if err := rt.start(cfg, mux); err != nil {
+		return err
 	}
 
 	go console.New(h, cfg).Run(ctx, os.Stdin, os.Stdout)
+	go watchConfig(ctx, rt, h, mux)
 
 	scheme := "wss"
 	if cfg.NoTLS {
@@ -122,34 +219,161 @@ func run() error {
 		"name", cfg.Name,
 		"version", resolveVersion(),
 	)
-	errc := make(chan error, 1)
-	go func() {
-		var err error
-		if cfg.NoTLS {
-			err = srv.ListenAndServe()
-		} else {
-			err = srv.ListenAndServeTLS("", "")
-		}
-		if errors.Is(err, http.ErrServerClosed) {
-			err = nil
-		}
-		errc <- err
-	}()
 
-	select {
-	case err := <-errc:
-		return err
-	case <-ctx.Done():
-	}
+	<-ctx.Done()
 
 	slog.Info("shutting down")
 	h.CloseAll()
-
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	_ = srv.Shutdown(shutdownCtx)
+	rt.shutdown()
 
 	return nil
+}
+
+func applyPatch(rt *serverRuntime, h *hub.Hub, mux http.Handler) func(adminapi.Patch) (*config.Config, error) {
+	return func(p adminapi.Patch) (*config.Config, error) {
+		cfg := rt.currentConfig()
+		needsRebind := false
+
+		if p.Name != nil {
+			cfg.Name = *p.Name
+		}
+		if p.Description != nil {
+			cfg.Description = *p.Description
+		}
+		if p.ServerCoverURL != nil {
+			cfg.ServerCoverURL = *p.ServerCoverURL
+		}
+		if p.MinClientVersion != nil {
+			cfg.MinClientVersion = *p.MinClientVersion
+		}
+		if p.MaxClientVersion != nil {
+			cfg.MaxClientVersion = *p.MaxClientVersion
+		}
+		if p.DevMode != nil {
+			cfg.DevMode = *p.DevMode
+		}
+		if p.Port != nil && *p.Port != cfg.Port {
+			if *p.Port < 1 || *p.Port > 65535 {
+				return nil, fmt.Errorf("invalid port")
+			}
+			cfg.Port = *p.Port
+			needsRebind = true
+		}
+		if p.NoTLS != nil && *p.NoTLS != cfg.NoTLS {
+			cfg.NoTLS = *p.NoTLS
+			needsRebind = true
+		}
+		if p.Cert != nil && *p.Cert != cfg.Cert {
+			cfg.Cert = *p.Cert
+			needsRebind = true
+		}
+		if p.Key != nil && *p.Key != cfg.Key {
+			cfg.Key = *p.Key
+			needsRebind = true
+		}
+
+		if err := cfg.Save(); err != nil {
+			return nil, err
+		}
+
+		if err := applyConfig(rt, h, mux, cfg, needsRebind); err != nil {
+			return nil, err
+		}
+
+		return cfg, nil
+	}
+}
+
+func applyConfig(rt *serverRuntime, h *hub.Hub, mux http.Handler, cfg *config.Config, needsRebind bool) error {
+	if needsRebind {
+		if err := rt.rebind(cfg, mux); err != nil {
+			return err
+		}
+	} else {
+		rt.mu.Lock()
+		rt.cfg = cfg
+		rt.mu.Unlock()
+	}
+
+	h.SetVersionRange(cfg.MinClientVersion, cfg.MaxClientVersion, cfg.DevMode)
+	h.UpdateMeta(cfg.Name, cfg.Description, cfg.ServerCoverURL)
+	return nil
+}
+
+func configNeedsRebind(oldCfg, newCfg *config.Config) bool {
+	return newCfg.Port != oldCfg.Port ||
+		newCfg.NoTLS != oldCfg.NoTLS ||
+		newCfg.Cert != oldCfg.Cert ||
+		newCfg.Key != oldCfg.Key
+}
+
+func watchConfig(ctx context.Context, rt *serverRuntime, h *hub.Hub, mux http.Handler) {
+	var lastMod time.Time
+	if info, err := os.Stat(config.Path); err == nil {
+		lastMod = info.ModTime()
+	}
+
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			info, err := os.Stat(config.Path)
+			if err != nil || info.ModTime().Equal(lastMod) {
+				continue
+			}
+
+			time.Sleep(150 * time.Millisecond)
+			settled, err := os.Stat(config.Path)
+			if err != nil || !settled.ModTime().Equal(info.ModTime()) {
+				continue
+			}
+			lastMod = settled.ModTime()
+
+			cfg, _, err := config.Load()
+			if err != nil {
+				slog.Warn("config reload", "err", err)
+				continue
+			}
+
+			old := rt.currentConfig()
+			if err := applyConfig(rt, h, mux, cfg, configNeedsRebind(old, cfg)); err != nil {
+				slog.Warn("config reload", "err", err)
+				continue
+			}
+
+			slog.Info("config reloaded from disk", "name", cfg.Name)
+		}
+	}
+}
+
+func publicInfoHandler(rt *serverRuntime) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if origin := r.Header.Get("Origin"); origin != "" {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Vary", "Origin")
+		}
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		if r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+
+		cfg := rt.currentConfig()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"name":        cfg.Name,
+			"description": cfg.Description,
+			"cover":       cfg.ServerCoverURL,
+			"version":     resolveVersion(),
+		})
+	})
 }
 
 func resolveVersion() string {

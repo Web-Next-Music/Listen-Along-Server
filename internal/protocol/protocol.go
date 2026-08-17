@@ -48,8 +48,9 @@ const (
 )
 
 const (
-	CloseRoomNotFound = 4001
-	CloseKicked       = 4002
+	CloseRoomNotFound       = 4001
+	CloseKicked             = 4002
+	CloseVersionUnsupported = 4003
 )
 
 type UGC struct {
@@ -82,14 +83,18 @@ type Inbound struct {
 }
 
 type ServerInfo struct {
-	Type          string `json:"type"`
-	Name          string `json:"name"`
-	Version       string `json:"version,omitempty"`
-	Protocol      int    `json:"protocol"`
-	HostID        string `json:"hostId"`
-	RoomID        string `json:"roomId"`
-	DiscordUserID string `json:"discordUserId,omitempty"`
-	RoomName      string `json:"roomName,omitempty"`
+	Type             string `json:"type"`
+	Name             string `json:"name"`
+	Description      string `json:"description,omitempty"`
+	Cover            string `json:"cover,omitempty"`
+	Version          string `json:"version,omitempty"`
+	MinClientVersion string `json:"minClientVersion,omitempty"`
+	MaxClientVersion string `json:"maxClientVersion,omitempty"`
+	Protocol         int    `json:"protocol"`
+	HostID           string `json:"hostId"`
+	RoomID           string `json:"roomId"`
+	DiscordUserID    string `json:"discordUserId,omitempty"`
+	RoomName         string `json:"roomName,omitempty"`
 }
 
 type RoomRenamed struct {
