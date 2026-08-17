@@ -41,33 +41,3 @@ jobs:
               release_id: release.id,
               body: process.env.CLIFF_OUTPUT,
             });
-
-  build:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Setup Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: "1.26"
-
-      - name: Install Task
-        uses: arduino/setup-task@v2
-        with:
-          version: 3.x
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Build distribution
-        run: task dist
-
-      - name: Upload artifacts to release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            dist/listenalong
-            dist/listenalong.exe
