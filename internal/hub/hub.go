@@ -709,6 +709,7 @@ func (h *Hub) navigate(roomID, trackID string, ugc *protocol.UGC, position *floa
 
 	slog.Info("navigate", "room", roomID, "by", by, "trackId", trackID, "ugc", ugc != nil, "position", r.state.position)
 	h.broadcastLocked(r, h.stateSyncLocked(r, by), exclude)
+	h.broadcastRoomListLocked()
 }
 
 func (h *Hub) queueSync(roomID string, queue []protocol.QueueEntry, queueIndex int, by string, exclude *Client) {
@@ -734,12 +735,16 @@ func (h *Hub) setPlaying(roomID string, playing bool, by *Client) {
 	defer h.mu.Unlock()
 
 	r := h.room(roomID)
-	if r.state.playing != playing {
+	changed := r.state.playing != playing
+	if changed {
 		r.state.snapshot()
 		r.state.playing = playing
 		slog.Info("playstate", "room", roomID, "by", by.discordUserID, "playing", playing)
 	}
 	h.broadcastLocked(r, h.stateSyncLocked(r, by.discordUserID), by)
+	if changed {
+		h.broadcastRoomListLocked()
+	}
 }
 
 func (h *Hub) seek(roomID string, position float64, by *Client) {
