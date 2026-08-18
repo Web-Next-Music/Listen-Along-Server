@@ -202,7 +202,7 @@ func run() error {
 
 	mux := http.NewServeMux()
 	mux.Handle("/", h.Handler(ctx))
-	mux.Handle("/api/admin/settings", adminapi.New(adminapi.Options{
+	mux.Handle("/api/settings", adminapi.New(adminapi.Options{
 		CurrentConfig: rt.currentConfig,
 		Apply:         applyPatch(rt, h, mux),
 	}))
